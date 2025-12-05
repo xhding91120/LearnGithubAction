@@ -1,0 +1,77 @@
+trigger: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+variables:
+  RESOURCE_GROUP: 'rg-azpipelines-images'
+  GALLERY_NAME: 'azpipelines_service'
+  IMAGE_NAME: 'VMSS-Agents'
+
+steps:
+- task: AzureCLI@2
+  displayName: 'List gallery image versions with tags and locks'
+  inputs:
+    azureSubscription: 'ARM_manage_vmss'
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      echo "Getting image versions for $(GALLERY_NAME)/$(IMAGE_NAME) in $(RESOURCE_GROUP)"
+      versions=$(az sig image-version list \
+        --resource-group "$(RESOURCE_GROUP)" \
+        --gallery-name "$(GALLERY_NAME)" \
+        --gallery-image-definition "$(IMAGE_NAME)" \
+        -o json)
+      echo "$versions" | jq -c '.[]' | while read version; do
+        version_name=$(echo $version | jq -r '.name')
+        version_id=$(echo $version | jq -r '.id')
+        tags=$(echo $version | jq -c '.tags')
+        if [ "$tags" == "null" ] || [ "$tags" == "{}" ]; then
+          tags_info="No tags"
+        else
+          tags_info="Tags: $tags"
+        fi
+        # Get replica info per region
+
+        # Get replica info: overall replicaCount and per-region info if available
+        replica_count=$(echo $version | jq -r '.publishingProfile.replicaCount // empty')
+        replica_regions=$(echo $version | jq -c '.publishingProfile.targetRegions // []')
+
+        replica_info=""
+        if [ -n "$replica_count" ]; then
+          replica_info="replicaCount: $replica_count"
+        else
+          replica_info="replicaCount: N/A"
+        fi
+
+        if [ "$replica_regions" != "[]" ]; then
+          region_lines=""
+          echo "$replica_regions" | jq -c '.[]' | while read region; do
+            region_name=$(echo $region | jq -r '.name')
+            region_replicas=$(echo $region | jq -r '.regionalReplicaCount // "N/A"')
+            region_lines="$region_lines\n    - $region_name: $region_replicas"
+            # Export region_lines for use outside the while loop
+            echo "$region_lines"
+          done | tail -n 1 | while read final_lines; do
+            replica_info="$replica_info\nreplica regions:$final_lines"
+            echo "$replica_info" > replica_info.txt
+          done
+          if [ -f replica_info.txt ]; then
+            replica_info=$(cat replica_info.txt)
+            rm replica_info.txt
+          fi
+        fi
+        
+        locks=$(az lock list --resource "$version_id" -o json)
+        if [ "$locks" == "[]" ]; then
+          lock_info="No lock"
+        else
+          lock_info="Lock(s): $(echo $locks | jq -c '[.[] | {name: .name, level: .level}]')"
+        fi
+        echo "Version: $version_name"
+        echo "  $tags_info"
+        echo "  $replica_info"
+        echo "  $lock_info"
+        echo ""
+      done
+
+    workingDirectory: $(System.DefaultWorkingDirectory)
